@@ -1,0 +1,1836 @@
+local Combat = {}
+local Killer = {}
+local Survivor = {}
+local Misc = {}
+
+local ctx
+
+-- ==================== COMBAT MODULE ====================
+function Combat.Init(context)
+    ctx = context
+end
+
+function Combat.ButcherCache(leads, lockedTarget)
+    local myChar = ctx.S.LocalPlayer.Character
+    local rightArm = myChar and (myChar:FindFirstChild("Right Arm") or myChar:FindFirstChild("RightHand"))
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    local startPos = rightArm and rightArm.Position or (myHRP and (myHRP.Position + Vector3.new(1.5, 0.5, 0)))
+
+    local targetPart = lockedTarget or Combat.GetUnifiedTarget("Survivor")
+
+    if not startPos or not targetPart then 
+        ctx.State.Butcher_HasCache = false
+        ctx.State.Butcher_TargetPart = nil
+        return 
+    end
+
+    local targetHRP = targetPart:IsA("Model") and targetPart:FindFirstChild("HumanoidRootPart") or targetPart
+    local targetPos = targetHRP.Position
+    local distance = (targetPos - startPos).Magnitude
+
+    if distance > 50 then
+        ctx.State.Butcher_HasCache = false
+        ctx.State.Butcher_TargetPart = nil
+        return
+    end
+
+    local targetVel = Vector3.zero
+    local targetHum = targetPart.Parent and targetPart.Parent:FindFirstChildOfClass("Humanoid")
+    if targetHum and targetHum.MoveDirection.Magnitude > 0 then
+        targetVel = targetHum.MoveDirection * targetHum.WalkSpeed
+    elseif targetHRP:IsA("BasePart") then
+        targetVel = Vector3.new(targetHRP.AssemblyLinearVelocity.X, 0, targetHRP.AssemblyLinearVelocity.Z)
+    end
+
+    local baseSpeed = 140
+    local timeToHit = distance / baseSpeed
+
+    local autoLead = (leads or 1.2) + (distance / 40) * 0.6
+    local predictedPos = targetPos + (targetVel * (timeToHit * autoLead))
+
+    ctx.State.Butcher_CachedDir = (predictedPos - startPos).Unit
+    ctx.State.Butcher_CachedSpeed = baseSpeed
+    ctx.State.Butcher_CachedStartPos = startPos
+    ctx.State.Butcher_CachedPredictedPos = predictedPos
+    ctx.State.Butcher_TargetPart = targetPart
+    ctx.State.Butcher_HasCache = true
+end
+
+local function GetVeilGravity(distance)
+    if distance >= 276 then return 70
+    elseif distance >= 250 then return 55
+    elseif distance >= 200 then return 50
+    elseif distance >= 175 then return 55
+    elseif distance >= 145 then return 60
+    elseif distance >= 125 then return 65
+    else return 70 end
+end
+
+function Combat.VeilCache(lockedTarget)
+    local myChar = ctx.S.LocalPlayer.Character
+    local rightArm = myChar and (myChar:FindFirstChild("Right Arm") or myChar:FindFirstChild("RightHand"))
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    local startPos = rightArm and rightArm.Position or (myHRP and (myHRP.Position + Vector3.new(1.5, 0.5, 0)))
+
+    local targetPart = lockedTarget or Combat.GetUnifiedTarget("Survivor")
+
+    if not startPos or not targetPart then 
+        ctx.State.Veil_HasCache = false
+        ctx.State.Veil_TargetPart = nil
+        return 
+    end
+
+    local targetHRP = targetPart:IsA("Model") and targetPart:FindFirstChild("HumanoidRootPart") or targetPart
+    local targetPos = targetHRP.Position
+    local targetVel = Vector3.zero
+
+    local targetHum = targetPart.Parent and targetPart.Parent:FindFirstChildOfClass("Humanoid")
+    if targetHum and targetHum.MoveDirection.Magnitude > 0 then
+        targetVel = targetHum.MoveDirection * targetHum.WalkSpeed
+    elseif targetHRP:IsA("BasePart") then
+        targetVel = Vector3.new(targetHRP.AssemblyLinearVelocity.X, 0, targetHRP.AssemblyLinearVelocity.Z)
+    end
+
+    local distance = (targetPos - startPos).Magnitude
+    local baseSpeed = ctx.Config.SmartPredict and 165 or ctx.Config.SPEAR_Speed
+    local gravValue = ctx.Config.SmartPredict and GetVeilGravity(distance) or ctx.Config.SPEAR_Gravity
+    local timeToHit = distance / baseSpeed
+
+    local predictedPos
+    if ctx.Config.SmartPredict then
+        local leadMultiplier = ctx.Config.Veil_LeadMultiplier or 1.7
+        predictedPos = targetPos + (targetVel * (timeToHit * leadMultiplier))
+    else
+        local dynamicPrediction = math.clamp(distance / 50, 0.1, 4.0)
+        predictedPos = targetPos + (targetVel * (timeToHit * dynamicPrediction))
+    end
+
+    local distanceMultiplier = math.clamp(distance / 100, 1, 2.5)
+    local dropCompensation = (0.5 * gravValue * (timeToHit ^ 2)) * distanceMultiplier
+    local finalAimPos = predictedPos + Vector3.new(0, dropCompensation, 0)
+
+    ctx.State.Veil_CachedDir = (finalAimPos - startPos).Unit
+    ctx.State.Veil_CachedSpeed = baseSpeed
+    ctx.State.Veil_CachedStartPos = startPos
+    ctx.State.Veil_CachedGrav = gravValue
+    ctx.State.Veil_CachedPredictedPos = predictedPos
+    ctx.State.Veil_TargetPart = targetPart
+    ctx.State.Veil_HasCache = true
+end
+
+function Combat.GetTargetPartObject(char)
+    if ctx.Config.AIM_TargetPart == "Head" then
+        return char:FindFirstChild("Head")
+    elseif ctx.Config.AIM_TargetPart == "Root" then
+        return char:FindFirstChild("HumanoidRootPart")
+    else
+        return char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso") or char:FindFirstChild("HumanoidRootPart")
+    end
+end
+
+function Combat.GetUnifiedTarget(targetType)
+    local bestTarget = nil
+    local closestDist = math.huge
+    local cam = workspace.CurrentCamera
+    local centerScreen = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+    
+    local myChar = ctx.S.LocalPlayer.Character
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return nil end
+
+    for _, p in ipairs(ctx.ActivePlayers) do
+        if p.Character then
+            local isKiller = ctx.IsKiller(p)
+            local isValidTarget = false
+            local myRole = ctx.GetRole()
+
+            if targetType == "Survivor" and not isKiller then isValidTarget = true
+            elseif targetType == "Killer" and isKiller then isValidTarget = true
+            elseif targetType == "Flash" and isKiller then isValidTarget = true
+            elseif targetType == "Pistol" then
+                if ctx.Config.Pistol_Target == "Killer" and isKiller then
+                    isValidTarget = true
+                elseif ctx.Config.Pistol_Target == "Survivor" and not isKiller then
+                    isValidTarget = true
+                end
+            elseif targetType == "Aimbot" then
+                if myRole == "Survivor" and isKiller then
+                    isValidTarget = true
+                elseif myRole == "Killer" and not isKiller then
+                    isValidTarget = true
+                end
+            end
+
+            if isValidTarget then
+                local targetChar = p.Character
+                local hum = targetChar:FindFirstChildOfClass("Humanoid")
+
+                if hum and hum.Health > 0 and not ctx.IsDowned(targetChar) then
+                    local partName = "HumanoidRootPart"
+
+                    if targetType == "Aimbot" or targetType == "Pistol" then
+                        if ctx.Config.AIM_TargetPart == "Head" or ctx.Config.AIM_TargetPart == 1 then
+                            partName = "Head"
+                        elseif ctx.Config.AIM_TargetPart == "Torso" or ctx.Config.AIM_TargetPart == 2 then
+                            partName = "Torso"
+                        end
+                    end
+
+                    local targetPart = targetChar:FindFirstChild(partName)
+                        or targetChar:FindFirstChild("Torso")
+                        or targetChar:FindFirstChild("HumanoidRootPart")
+
+                    if targetPart then
+                        local dist3D = (targetPart.Position - myHRP.Position).Magnitude
+                        local maxDist = math.huge
+
+                        if targetType == "Survivor" then
+                            maxDist = ctx.Config.SPEAR_MaxDist or 500
+                        elseif targetType == "Aimbot" then
+                            if ctx.GetRole() == "Killer" then
+                                maxDist = 10
+                            else
+                                maxDist = ctx.Config.Aimbot_MaxDist or 1000
+                            end
+                        end
+
+                        if dist3D <= maxDist then
+                            local useFOV = false
+                            local fovRadius = 0
+
+                            if targetType == "Aimbot" and ctx.Config.Aimbot_ShowFOV and ctx.GetRole() ~= "Killer" then
+                                useFOV = true
+                                fovRadius = ctx.Config.Aimbot_Radius or 100
+                            elseif targetType == "Pistol" and ctx.Config.Pistol_FOVMode then
+                                useFOV = true
+                                fovRadius = ctx.Config.Pistol_FOV or 100
+                            elseif targetType == "Survivor" and ctx.Config.Veil_ShowFOV then
+                                useFOV = true
+                                fovRadius = ctx.Config.Veil_FOV or 100
+                            end
+
+                            if useFOV then
+                                local screenPos, onScreen = cam:WorldToViewportPoint(targetPart.Position)
+
+                                if onScreen then
+                                    local dist2D = (Vector2.new(screenPos.X, screenPos.Y) - centerScreen).Magnitude
+
+                                    if dist2D < closestDist and dist2D <= fovRadius then
+                                        closestDist = dist2D
+                                        bestTarget = targetPart
+                                    end
+                                end
+                            else
+                                if dist3D < closestDist then
+                                    closestDist = dist3D
+                                    bestTarget = targetPart
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if targetType == "Pistol" and ctx.Config.Pistol_Target == "SCP" then
+        for _, obj in ipairs(ctx.Cache.SCPs) do
+            if obj and obj.Parent then
+                local hum = obj:FindFirstChildOfClass("Humanoid")
+                local root = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
+                if hum and root and math.floor(hum.WalkSpeed) > 0 and math.floor(hum.WalkSpeed) ~= 16 then
+                    local targetPart = root
+                    if (ctx.Config.AIM_TargetPart == "Head" or ctx.Config.AIM_TargetPart == 1) and obj:FindFirstChild("Head") then targetPart = obj.Head
+                    elseif (ctx.Config.AIM_TargetPart == "Torso" or ctx.Config.AIM_TargetPart == 2) and obj:FindFirstChild("Torso") then targetPart = obj.Torso end
+                    
+                    local screenPos, onScreen = cam:WorldToViewportPoint(targetPart.Position)
+                    
+                    if ctx.Config.Pistol_FOVMode then
+                        if onScreen then
+                            local dist2D = (Vector2.new(screenPos.X, screenPos.Y) - centerScreen).Magnitude
+                            if dist2D < closestDist and dist2D <= (ctx.Config.Pistol_FOV or 100) then
+                                closestDist = dist2D
+                                bestTarget = targetPart
+                            end
+                        end
+                    else
+                        local dist3D = (targetPart.Position - myHRP.Position).Magnitude
+                        if dist3D < closestDist then
+                            closestDist = dist3D
+                            bestTarget = targetPart
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return bestTarget
+end
+
+function Combat.FaceTarget(targetPart, smoothness)
+    if not targetPart then return end
+    smoothness = smoothness or 0.2
+    local cam = workspace.CurrentCamera
+    local targetCFrame = CFrame.lookAt(cam.CFrame.Position, targetPart.Position)
+    cam.CFrame = cam.CFrame:Lerp(targetCFrame, smoothness)
+end
+
+function Combat.GPP(startPos, targetPart, bulletSpeed)
+    local targetPos = targetPart.Position
+    
+    if not ctx.Config.Predict then
+        return targetPos
+    end
+    
+    local targetChar = targetPart.Parent
+    local targetHum = targetChar and targetChar:FindFirstChildOfClass("Humanoid")
+    
+    local flatVel = Vector3.new(0, 0, 0)
+    local speed = 0
+    
+    if targetHum then
+        flatVel = targetHum.MoveDirection * targetHum.WalkSpeed
+        speed = flatVel.Magnitude
+    end
+    
+    if speed < 0.1 then
+        return targetPos
+    end
+    
+    local ping = math.clamp(ctx.State.CurrentPing, 0, 0.25)
+    local initialDistance = (targetPos - startPos).Magnitude
+    local extraLead = ctx.Config.Pistol_PredictLead or 1
+    local timeToHit = ((initialDistance / bulletSpeed) * extraLead) + ping
+    local finalPrediction = targetPos + (flatVel * timeToHit)
+    
+    return finalPrediction
+end
+
+function Combat.AimFire()
+    local myChar = ctx.S.LocalPlayer.Character
+    if not myChar then return end
+    local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return end
+
+    -- Cari target Killer terdekat secara langsung agar pasti dapat
+    local targetPart = nil
+    local shortestDist = math.huge
+    for _, p in ipairs(ctx.S.Players:GetPlayers()) do
+        if p ~= ctx.S.LocalPlayer and p.Team and p.Team.Name == "Killer" and p.Character then
+            local kChar = p.Character
+            local hum = kChar:FindFirstChildOfClass("Humanoid")
+            local kHRP = kChar:FindFirstChild("HumanoidRootPart") or kChar:FindFirstChild("Torso")
+            if hum and hum.Health > 0 and kHRP then
+                local dist = (kHRP.Position - myHRP.Position).Magnitude
+                if dist < shortestDist then
+                    shortestDist = dist
+                    targetPart = kHRP
+                end
+            end
+        end
+    end
+
+    if targetPart then
+        local weaponArg = Combat.GetWeaponArg()
+        if weaponArg then
+            local origin
+            pcall(function()
+                origin = weaponArg:IsA("BasePart") and weaponArg.Position or (weaponArg:FindFirstChildOfClass("BasePart") and weaponArg:FindFirstChildOfClass("BasePart").Position)
+            end)
+            origin = origin or (myHRP.Position + Vector3.new(0, 1.5, 0))
+
+            local targetPos = targetPart.Position
+            local targetHum = targetPart.Parent and targetPart.Parent:FindFirstChildOfClass("Humanoid")
+            if targetHum and targetHum.MoveDirection.Magnitude > 0 then
+                targetPos = targetPos + (targetHum.MoveDirection * targetHum.WalkSpeed * 0.1)
+            end
+
+            local aimDirection = (targetPos - origin).Unit
+
+            local remotes = ctx.S.ReplicatedStorage:FindFirstChild("Remotes")
+            if remotes and remotes:FindFirstChild("Items") and remotes.Items:FindFirstChild("Twist of Fate") and remotes.Items["Twist of Fate"]:FindFirstChild("Fire") then
+                remotes.Items["Twist of Fate"].Fire:FireServer(weaponArg, aimDirection, 3)
+            end
+        end
+    end
+end
+
+
+local pistolRayParams = RaycastParams.new()
+pistolRayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+function Combat.ClearPistolV2Laser()
+    if ctx.State.PistolV2_LaserBeam then
+        pcall(function() ctx.State.PistolV2_LaserBeam:Destroy() end)
+        ctx.State.PistolV2_LaserBeam = nil
+    end
+end
+
+function Combat.RenderPistolV2Laser(origin, targetPos)
+    if not ctx.State.PistolV2_LaserBeam or not ctx.State.PistolV2_LaserBeam.Parent then
+        local part = Instance.new("Part")
+        part.Name = "ToFV2Laser"
+        part.Anchored = true
+        part.CanCollide = false
+        part.CanTouch = false
+        part.CanQuery = false
+        part.CastShadow = false
+        part.Material = Enum.Material.Neon
+        part.Color = Color3.fromRGB(255, 50, 50)
+        part.Parent = ctx.S.Workspace
+        ctx.State.PistolV2_LaserBeam = part
+    end
+
+    local magnitude = (targetPos - origin).Magnitude
+    if magnitude < 0.01 then magnitude = 0.01 end
+
+    ctx.State.PistolV2_LaserBeam.Size = Vector3.new(0.08, 0.08, magnitude)
+    ctx.State.PistolV2_LaserBeam.CFrame = CFrame.new((origin + targetPos) / 2, targetPos)
+    ctx.State.PistolV2_LaserBeam.Transparency = 0
+end
+
+function Combat.GetSmoothedVelocity(part, smoothing)
+    if not part then return Vector3.zero end
+    local position = part.Position
+    local currentTime = os.clock()
+    ctx.State.PistolV2_VelocityCache = ctx.State.PistolV2_VelocityCache or {}
+    local entries = ctx.State.PistolV2_VelocityCache
+
+    local entry = entries[part]
+    if not entry then
+        entry = { samples = {}, writeIdx = 1, count = 0, smoothedVel = Vector3.zero }
+        entries[part] = entry
+    end
+
+    local samples = entry.samples
+    local writeIdx = entry.writeIdx
+    local sample = samples[writeIdx] or {}
+    samples[writeIdx] = sample
+
+    sample.t = currentTime
+    sample.pos = position
+    entry.writeIdx = (writeIdx % 128) + 1
+    entry.count = math.min(entry.count + 1, 128)
+
+    if entry.count < 2 then return entry.smoothedVel end
+
+    local windowSec = 0.1
+    local maxSampleAge = 0.3
+    local minDiff = math.huge
+    local bestSample = nil
+
+    for i = 1, entry.count do
+        local s = samples[i]
+        local age = currentTime - s.t
+        if age > 0 and age <= maxSampleAge then
+            local diff = math.abs(s.t - (currentTime - windowSec))
+            if diff < minDiff then
+                minDiff = diff
+                bestSample = s
+            end
+        end
+    end
+
+    if not bestSample then return entry.smoothedVel end
+    local timeDelta = currentTime - bestSample.t
+    if timeDelta < 0.01 then return entry.smoothedVel end
+
+    local rawVel = (position - bestSample.pos) / timeDelta
+    if rawVel.Magnitude > 250 then return entry.smoothedVel end
+
+    local smooth = math.clamp(smoothing or ctx.Config.PistolV2_VelSmoothing or 0.35, 0, 1)
+    entry.smoothedVel = entry.smoothedVel:Lerp(rawVel, smooth)
+    return entry.smoothedVel
+end
+
+function Combat.GetWeaponArg()
+    local myChar = ctx.S.LocalPlayer.Character
+    if not myChar then return nil end
+    local twistOfFate = myChar:FindFirstChild("Twist of Fate") or myChar:FindFirstChild("Twist of Fate", true)
+    if not twistOfFate then return nil end
+
+    local weaponArg = twistOfFate
+    local rightArm = twistOfFate:FindFirstChild("Right Arm")
+    if rightArm then
+        if rightArm:FindFirstChild("EmperorGun") then
+            weaponArg = rightArm:FindFirstChild("EmperorGun")
+        elseif rightArm:FindFirstChild("gun") then
+            weaponArg = rightArm:FindFirstChild("gun")
+        else
+            weaponArg = rightArm
+        end
+    end
+    return weaponArg
+end
+
+function Combat.PredictPistolV2Position(origin, gunInst, speed, targetPart, targetChar)
+    local position = targetPart.Position
+    local rootPart = targetChar and (targetChar:FindFirstChild("HumanoidRootPart") or targetPart)
+    local humanoid = targetChar and targetChar:FindFirstChildOfClass("Humanoid")
+
+    local isAir = false
+    if humanoid then
+        isAir = (humanoid:GetState() == Enum.HumanoidStateType.Freefall) or (humanoid.FloorMaterial == Enum.Material.Air)
+    end
+
+    local vel = Vector3.zero
+    if rootPart then
+        vel = Combat.GetSmoothedVelocity(rootPart, ctx.Config.PistolV2_VelSmoothing)
+        if not isAir then
+            vel = Vector3.new(vel.X, 0, vel.Z)
+        end
+    end
+
+    local delta = position - origin
+    local dist = delta.Magnitude
+    if dist < 0.1 then return nil, nil, nil, nil end
+    if dist < 5 then return delta.Unit, gunInst, origin, position end
+
+    local timeToHit = dist / speed
+    local predictStr = ctx.Config.PistolV2_PredictStrength or 1.5
+    local predictedPos = position
+
+    for i = 1, 2 do
+        if isAir then
+            predictedPos = position + (vel * timeToHit * predictStr) - Vector3.new(0, 0.5 * ctx.S.Workspace.Gravity * timeToHit * timeToHit, 0)
+        else
+            predictedPos = position + (vel * timeToHit * predictStr)
+        end
+        timeToHit = (predictedPos - origin).Magnitude / speed
+    end
+
+    if isAir then
+        pistolRayParams.FilterDescendantsInstances = { targetChar, ctx.S.LocalPlayer.Character }
+        local hit = ctx.S.Workspace:Raycast(position, predictedPos - position, pistolRayParams)
+        if hit then
+            predictedPos = hit.Position
+        end
+    end
+
+    local finalDir = predictedPos - origin
+    if finalDir.Magnitude < 0.1 then return nil, nil, nil, nil end
+    return finalDir.Unit, gunInst, origin, predictedPos
+end
+
+function Combat.GetPistolV2Target()
+    local weaponArg = Combat.GetWeaponArg()
+    local char = ctx.S.LocalPlayer.Character
+    if not (weaponArg and char) then return nil, nil, nil, nil end
+
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil, nil, nil, nil end
+
+    local origin
+    pcall(function()
+        origin = weaponArg:IsA("BasePart") and weaponArg.Position or (weaponArg:FindFirstChildOfClass("BasePart") and weaponArg:FindFirstChildOfClass("BasePart").Position)
+    end)
+    origin = origin or Vector3.new(hrp.Position.X, hrp.Position.Y + 1.5, hrp.Position.Z)
+
+    local bulletSpeed = 200
+    
+    -- Cari Killer terdekat secara langsung untuk V2
+    local bestPart = nil
+    local shortestDist = math.huge
+    for _, p in ipairs(ctx.S.Players:GetPlayers()) do
+        if p ~= ctx.S.LocalPlayer and p.Team and p.Team.Name == "Killer" and p.Character then
+            local kChar = p.Character
+            local hum = kChar:FindFirstChildOfClass("Humanoid")
+            local kHRP = kChar:FindFirstChild("HumanoidRootPart") or kChar:FindFirstChild("Torso")
+            if hum and hum.Health > 0 and kHRP then
+                local dist = (kHRP.Position - hrp.Position).Magnitude
+                if dist < shortestDist then
+                    shortestDist = dist
+                    bestPart = kHRP
+                end
+            end
+        end
+    end
+
+    if bestPart then
+        local bestChar = bestPart.Parent
+        return Combat.PredictPistolV2Position(origin, weaponArg, bulletSpeed, bestPart, bestChar)
+    end
+
+    return nil, nil, nil, nil
+end
+
+
+function Combat.UpdatePistolV2Cache()
+    if not ctx.Config.PistolV2_Enabled then
+        ctx.State.PistolV2_CachedShouldRedirect = false
+        ctx.State.PistolV2_CachedRedirectDir = nil
+        ctx.State.PistolV2_CachedOriginPos = nil
+        ctx.State.PistolV2_CachedTargetPos = nil
+        Combat.ClearPistolV2Laser()
+        return
+    end
+
+    local dir, gun, origin, targetPos = Combat.GetPistolV2Target()
+
+    if dir and origin and targetPos then
+        ctx.State.PistolV2_CachedShouldRedirect = true
+        ctx.State.PistolV2_CachedRedirectDir = dir
+        ctx.State.PistolV2_CachedOriginPos = origin
+        ctx.State.PistolV2_CachedTargetPos = targetPos
+
+        if ctx.Config.PistolV2_ShowLaser and ctx.State.PistolV2_IsAiming then
+            Combat.RenderPistolV2Laser(origin, targetPos)
+        elseif ctx.State.PistolV2_LaserBeam then
+            ctx.State.PistolV2_LaserBeam.Transparency = 1
+        end
+    else
+        ctx.State.PistolV2_CachedShouldRedirect = false
+        ctx.State.PistolV2_CachedRedirectDir = nil
+        ctx.State.PistolV2_CachedOriginPos = origin
+        ctx.State.PistolV2_CachedTargetPos = nil
+
+        if ctx.State.PistolV2_LaserBeam then
+            ctx.State.PistolV2_LaserBeam.Transparency = 1
+        end
+    end
+end
+
+function Combat.FirePistolV2Bypass()
+    if not ctx.Config.PistolV2_Enabled then return end
+
+    local char = ctx.S.LocalPlayer.Character
+    if not char then return end
+
+    local weaponArg = Combat.GetWeaponArg()
+    if not weaponArg then return end
+
+    local redirectDir = ctx.State.PistolV2_CachedRedirectDir
+    local originPos = ctx.State.PistolV2_CachedOriginPos
+    local targetPos = ctx.State.PistolV2_CachedTargetPos
+
+    if not (redirectDir and originPos and targetPos) then
+        local d, g, o, t = Combat.GetPistolV2Target()
+        if not (d and o and t) then return end
+        redirectDir = d
+        originPos = o
+        targetPos = t
+        if g then weaponArg = g end
+    end
+
+    local remotes = ctx.S.ReplicatedStorage:FindFirstChild("Remotes")
+    if remotes and remotes:FindFirstChild("Items") and remotes.Items:FindFirstChild("Twist of Fate") and remotes.Items["Twist of Fate"]:FindFirstChild("Fire") then
+        remotes.Items["Twist of Fate"].Fire:FireServer(weaponArg, redirectDir)
+    end
+
+    if ctx.Config.PistolV2_ShowLaser then
+        pcall(function() Combat.RenderPistolV2Laser(originPos, targetPos) end)
+    end
+end
+
+function Combat.CheckTouchUI(input)
+    local playerGui = ctx.S.LocalPlayer:FindFirstChild("PlayerGui")
+    local controlContainer = playerGui and playerGui:FindFirstChild("Survivor-mob")
+        and playerGui["Survivor-mob"]:FindFirstChild("Controls")
+        and playerGui["Survivor-mob"].Controls:FindFirstChild("Gui-mob")
+
+    if not controlContainer then return false end
+
+    local myChar = ctx.S.LocalPlayer.Character
+    local isBusy = myChar and ctx.IsPlayerBusy(myChar)
+
+    local touchButtons = {"attack", "Attack", "shoot", "Shoot", "fire", "Fire"}
+    local targetBtn = nil
+
+    for _, btnName in ipairs(touchButtons) do
+        local foundBtn = controlContainer:FindFirstChild(btnName, true)
+        if foundBtn and foundBtn:IsA("GuiObject") then
+            if foundBtn.Visible or isBusy then
+                targetBtn = foundBtn
+                break
+            end
+        end
+    end
+
+    if not targetBtn then
+        targetBtn = controlContainer
+    end
+
+    if not targetBtn then return false end
+
+    local pos = input.Position
+    local absPos = targetBtn.AbsolutePosition
+    local absSize = targetBtn.AbsoluteSize
+
+    if absSize.X <= 0 or absSize.Y <= 0 then
+        absPos = controlContainer.AbsolutePosition
+        absSize = controlContainer.AbsoluteSize
+    end
+
+    return pos.X >= absPos.X and pos.X <= (absPos.X + absSize.X) and pos.Y >= absPos.Y and pos.Y <= (absPos.Y + absSize.Y)
+end
+
+function Combat.EnablePistolV2Listeners(enable)
+    if enable then
+        if not ctx.State.PistolV2_CacheConn then
+            local timer = 0
+            ctx.State.PistolV2_CacheConn = ctx.S.RunService.Heartbeat:Connect(function(dt)
+                if not ctx.Config.PistolV2_Enabled then return end
+                timer = timer + dt
+                if timer >= 0.033 then
+                    timer = 0
+                    Combat.UpdatePistolV2Cache()
+                end
+            end)
+        end
+    else
+        if ctx.State.PistolV2_CacheConn then 
+            ctx.State.PistolV2_CacheConn:Disconnect()
+            ctx.State.PistolV2_CacheConn = nil 
+        end
+
+        ctx.State.PistolV2_IsHoldingBypass = false
+        ctx.State.PistolV2_IsAiming = false
+        ctx.State.PistolV2_CachedShouldRedirect = false
+        ctx.State.PistolV2_CachedRedirectDir = nil
+        Combat.ClearPistolV2Laser()
+    end
+end
+
+-- ==================== KILLER MODULE ====================
+local raw_getgc = getgc
+local raw_getinfo = getinfo
+local raw_get = rawget
+local raw_getupvalues = getupvalues
+local raw_setupvalue = setupvalue
+local raw_islclosure = islclosure
+local raw_isexecutorclosure = isexecutorclosure or isourclosure
+
+function Killer.Init(context)
+    ctx = context
+end
+
+function Killer.GetKillerUI()
+    local playerGui = ctx.S.LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then return nil end
+    for _, gui in pairs(playerGui:GetChildren()) do
+        if string.sub(gui.Name, -4) == "-mob" and gui.Name ~= "Survivor-mob" then
+            return gui
+        end
+    end
+    return nil
+end
+
+function Killer.KillerPredict()
+    if ctx.S.LocalPlayer.Team and ctx.S.LocalPlayer.Team.Name == "Spectator" then
+        if not ctx.State.isPredicting then
+            ctx.State.isPredicting = true
+            if ctx.UIElements.Spectator then ctx.UIElements.Spectator.KillerFrame.Visible = true end
+            task.spawn(function()
+                while ctx.State.isPredicting and not ctx.State.Unloaded do
+                    local bestPlayer, highestChance = nil, -1
+                    for _, p in ipairs(ctx.S.Players:GetPlayers()) do
+                        local allowKiller = p:GetAttribute("AllowKiller")
+                        local killerChance = p:GetAttribute("KillerChance")
+                        if allowKiller == true and type(killerChance) == "number" and killerChance > highestChance then
+                            highestChance, bestPlayer = killerChance, p
+                        end
+                    end
+                    if not bestPlayer then
+                        for _, p in ipairs(ctx.S.Players:GetPlayers()) do
+                            local killerChance = p:GetAttribute("KillerChance")
+                            if type(killerChance) == "number" and killerChance > highestChance then
+                                highestChance, bestPlayer = killerChance, p
+                            end
+                        end
+                    end
+                    if ctx.UIElements.Spectator then
+                        if bestPlayer then
+                            local kType = bestPlayer:FindFirstChild("SelectedKiller") and bestPlayer.SelectedKiller.Value or bestPlayer:GetAttribute("SelectedKiller") or "Unknown"
+                            ctx.UIElements.Spectator.KillerText.Text = string.format("Killer: %s (%s)", bestPlayer.Name, kType)
+                        else
+                            ctx.UIElements.Spectator.KillerText.Text = "Killer: Tidak ada data"
+                        end
+                    end
+                    task.wait(1)
+                end
+            end)
+        end
+    else
+        ctx.State.isPredicting = false
+        if ctx.UIElements.Spectator then ctx.UIElements.Spectator.KillerFrame.Visible = false end
+    end
+end
+
+function Killer.InvisibleSlasher(Value)
+    if not Value then
+        if getgenv().SlasherInvisLoop then 
+            task.cancel(getgenv().SlasherInvisLoop)
+            getgenv().SlasherInvisLoop = nil
+        end
+        return
+    end
+
+    if getgenv().SlasherInvisLoop then task.cancel(getgenv().SlasherInvisLoop) end
+
+    local cachedSlasherFns = {}
+    pcall(function()
+        for _, fn in pairs(raw_getgc(true)) do
+            if type(fn) == "function" and raw_islclosure(fn) and not raw_isexecutorclosure(fn) then
+                local info = raw_getinfo(fn)
+                if info and info.source and string.find(info.source, "Powers") then
+                    table.insert(cachedSlasherFns, fn)
+                end
+            end
+        end
+    end)
+
+    getgenv().SlasherInvisLoop = task.spawn(function()
+        while task.wait(0.5) do
+            pcall(function()
+                local selectedKiller = ctx.S.LocalPlayer:FindFirstChild("SelectedKiller")
+                local killerName = selectedKiller and selectedKiller.Value or ctx.S.LocalPlayer:GetAttribute("SelectedKiller")
+
+                if ctx.GetRole() == "Killer" and killerName == "Slasher" then
+                    
+                    for _, fn in ipairs(cachedSlasherFns) do
+                        local upvals = raw_getupvalues(fn)
+                        for i, v in pairs(upvals) do
+                            if type(v) == "boolean" and v == true then
+                                raw_setupvalue(fn, i, false)
+                            end
+                        end
+                    end
+
+                    local char = ctx.S.LocalPlayer.Character
+                    if char then
+                        if char:GetAttribute("LakeMist") then char:SetAttribute("LakeMist", false) end
+                        if char:GetAttribute("Invisibility") then char:SetAttribute("Invisibility", false) end
+                        
+                        local checkInt = char:FindFirstChild("CheckInterractable")
+                        if checkInt and checkInt:GetAttribute("action") then
+                            checkInt:SetAttribute("action", false)
+                        end
+                    end
+                end
+            end)
+        end
+    end)
+end
+
+function Killer.GetClosestTarget()
+    local closestPlayer = nil
+    local shortestDistance = math.huge
+    local myChar = ctx.S.LocalPlayer.Character
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    
+    if not myHRP then return nil end
+
+    for _, player in ipairs(ctx.S.Players:GetPlayers()) do
+        if player ~= ctx.S.LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            local humanoid = player.Character:FindFirstChild("Humanoid")
+            if humanoid and humanoid.Health > 0 and not ctx.IsDowned(player.Character) then
+                local targetHRP = player.Character.HumanoidRootPart
+                local distance = (myHRP.Position - targetHRP.Position).Magnitude
+                
+                if distance < shortestDistance then
+                    shortestDistance = distance
+                    closestPlayer = player.Character
+                end
+            end
+        end
+    end
+    return closestPlayer
+end
+
+function Killer.DashLock()
+    if ctx.State.isAimLocking then return end
+    
+    if tick() - (ctx.State.lastAimLockTime or 0) < 0.2 then return end 
+    ctx.State.lastAimLockTime = tick()
+    
+    if ctx.GetRole() == "Killer" then
+        ctx.State.currentTarget = Killer.GetClosestTarget()
+        
+        if ctx.State.currentTarget and ctx.State.currentTarget:FindFirstChild("HumanoidRootPart") then
+            ctx.State.isAimLocking = true
+            
+            if ctx.State.lockTimerThread then task.cancel(ctx.State.lockTimerThread) end
+            
+            ctx.State.lockTimerThread = task.delay(2, function()
+                ctx.State.isAimLocking = false
+                ctx.State.currentTarget = nil
+                ctx.State.lockTimerThread = nil
+            end)
+        end
+    end
+end
+
+function Killer.AutoLock(Value)
+    if not Value then
+        if getgenv().DashRenderConn then getgenv().DashRenderConn:Disconnect(); getgenv().DashRenderConn = nil end
+        if getgenv().DashInputConn then getgenv().DashInputConn:Disconnect(); getgenv().DashInputConn = nil end
+        if getgenv().DashMobileLoop then task.cancel(getgenv().DashMobileLoop); getgenv().DashMobileLoop = nil end
+        if getgenv().DashMobileBtnConn then getgenv().DashMobileBtnConn:Disconnect(); getgenv().DashMobileBtnConn = nil end
+        ctx.State.isAimLocking = false
+        ctx.State.currentTarget = nil
+        return
+    end
+
+    getgenv().DashRenderConn = ctx.S.RunService.RenderStepped:Connect(function(dt)
+        if ctx.State.isAimLocking and ctx.State.currentTarget and ctx.State.currentTarget:FindFirstChild("HumanoidRootPart") then
+            local targetPosition = ctx.State.currentTarget.HumanoidRootPart.Position
+            local newCameraCFrame = CFrame.lookAt(ctx.S.Camera.CFrame.Position, targetPosition)
+            
+            local smoothness = 10 
+            local alpha = math.clamp(dt * smoothness, 0, 1)
+            
+            ctx.S.Camera.CFrame = ctx.S.Camera.CFrame:Lerp(newCameraCFrame, alpha)
+        else
+            ctx.State.isAimLocking = false
+        end
+    end)
+
+    getgenv().DashInputConn = ctx.S.UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton2 then
+            Killer.DashLock()
+        end
+    end)
+
+    getgenv().DashMobileLoop = task.spawn(function()
+        local lastButton = nil
+        local pGui = ctx.S.LocalPlayer:WaitForChild("PlayerGui", 10)
+        
+        while task.wait(2) do
+            pcall(function()
+                if pGui then
+                    local targetMobFolder = pGui:FindFirstChild("Hidden-mob")
+                    local actionBtn = targetMobFolder and targetMobFolder:FindFirstChild("Controls") and targetMobFolder.Controls:FindFirstChild("move2")
+                    
+                    if actionBtn and actionBtn ~= lastButton then
+                        if getgenv().DashMobileBtnConn then getgenv().DashMobileBtnConn:Disconnect() end
+                        lastButton = actionBtn
+                        
+                        getgenv().DashMobileBtnConn = actionBtn.InputBegan:Connect(function(input)
+                            if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+                                Killer.DashLock()
+                            end
+                        end)
+                    end
+                end
+            end)
+        end
+    end)
+end
+
+function Killer.InfLunge()
+    if ctx.State.isHoldingLunge then return end
+    ctx.State.isHoldingLunge = true
+    
+    task.spawn(function()
+        while ctx.State.isHoldingLunge and ctx.Config.Killer_InfLunge and ctx.GetRole() == "Killer" do
+            pcall(function()
+                game:GetService("ReplicatedStorage").Remotes.Attacks.Lunge:FireServer()
+            end)
+            task.wait(0.05) 
+        end
+    end)
+end
+
+function Killer.InfLungeV2(char)
+    if not char then return end
+    char:SetAttribute("lungeboost", 999)
+    if ctx.State.lungeV2Connection then ctx.State.lungeV2Connection:Disconnect() end
+    
+    ctx.State.lungeV2Connection = char:GetAttributeChangedSignal("lungeboost"):Connect(function()
+        if ctx.Config.Killer_InfLungeV2 and char:GetAttribute("lungeboost") ~= 999 then
+            char:SetAttribute("lungeboost", 999)
+        end
+    end)
+end
+
+function Killer.BlockVault(state)
+    local remotes = ctx.S.ReplicatedStorage:FindFirstChild("Remotes")
+    if not remotes then return end
+    
+    local windowRemotes = remotes:FindFirstChild("Window")
+    local palletRemotes = remotes:FindFirstChild("Pallet")
+    local myChar = ctx.S.LocalPlayer.Character
+    if not myChar then return end
+    
+    local httpService = game:GetService("HttpService")
+    
+    if windowRemotes then
+        local vaultEvent = windowRemotes:FindFirstChild("VaultEvent")
+        local vaultCompleteEvent = windowRemotes:FindFirstChild("VaultCompleteEvent")
+        
+        local windowsFolder = nil
+        if ctx.S.Workspace:FindFirstChild("Map") then
+            if ctx.S.Workspace.Map:FindFirstChild("resources") and ctx.S.Workspace.Map.resources:FindFirstChild("Windows") then
+                windowsFolder = ctx.S.Workspace.Map.resources.Windows
+            elseif ctx.S.Workspace.Map:FindFirstChild("Windows") then
+                windowsFolder = ctx.S.Workspace.Map.Windows
+            end
+        elseif ctx.S.Workspace:FindFirstChild("resources") and ctx.S.Workspace.resources:FindFirstChild("Windows") then
+            windowsFolder = ctx.S.Workspace.resources.Windows
+        else
+            windowsFolder = ctx.S.Workspace:FindFirstChild("Windows", true)
+        end
+        
+        if windowsFolder then
+            for _, winModel in ipairs(windowsFolder:GetChildren()) do
+                local targetPart = winModel:FindFirstChild("VaultTrigger", true) 
+                    or winModel:FindFirstChild("VaultPointInUse", true) 
+                    or winModel:FindFirstChildWhichIsA("BasePart")
+                
+                if targetPart then
+                    pcall(function()
+                        if state then
+                            if vaultEvent then
+                                vaultEvent:FireServer(targetPart, true, httpService:GenerateGUID(false), myChar, "medium")
+                            end
+                        else
+                            if vaultCompleteEvent then
+                                vaultCompleteEvent:FireServer(targetPart, false, httpService:GenerateGUID(false), myChar)
+                            end
+                        end
+                    end)
+                end
+            end
+        end
+    end
+
+    if palletRemotes then
+        local slideEvent = palletRemotes:FindFirstChild("PalletSlideEvent")
+        local slideCompleteEvent = palletRemotes:FindFirstChild("PalletSlideCompleteEvent")
+        
+        local palletsFolder = nil
+        if ctx.S.Workspace:FindFirstChild("Map") then
+            if ctx.S.Workspace.Map:FindFirstChild("resources") and ctx.S.Workspace.Map.resources:FindFirstChild("Pallets") then
+                palletsFolder = ctx.S.Workspace.Map.resources.Pallets
+            elseif ctx.S.Workspace.Map:FindFirstChild("Pallets") then
+                palletsFolder = ctx.S.Workspace.Map.Pallets
+            end
+        elseif ctx.S.Workspace:FindFirstChild("resources") and ctx.S.Workspace.resources:FindFirstChild("Pallets") then
+            palletsFolder = ctx.S.Workspace.resources.Pallets
+        else
+            palletsFolder = ctx.S.Workspace:FindFirstChild("Pallets", true)
+        end
+        
+        if palletsFolder then
+            for _, palletModel in ipairs(palletsFolder:GetChildren()) do
+                local intact = palletModel:FindFirstChild("Intact")
+                local targetPart = intact and (intact:FindFirstChild("PalletPointSlide") or intact:FindFirstChild("PalletPoint") or intact:FindFirstChildWhichIsA("BasePart"))
+                    or palletModel:FindFirstChild("PalletPointSlide", true)
+                    or palletModel:FindFirstChildWhichIsA("BasePart")
+                
+                if targetPart then
+                    pcall(function()
+                        if state then
+                            if slideEvent then
+                                slideEvent:FireServer(targetPart, true, httpService:GenerateGUID(false), myChar)
+                            end
+                        else
+                            if slideCompleteEvent then
+                                slideCompleteEvent:FireServer(targetPart, httpService:GenerateGUID(false), myChar)
+                            end
+                        end
+                    end)
+                end
+            end
+        end
+    end
+end
+
+-- ==================== SURVIVOR MODULE ====================
+function Survivor.Init(context)
+    ctx = context
+end
+
+Survivor.VALID_PARRY_IDS = {
+    -- Veil
+    ["78935059863801"] = "Veil Basic", ["122812055447896"] = "Veil lunge",
+    -- Mayers / Stalker
+    ["133963973694098"] = "Stalker Basic", ["117042998468241"] = "Stalker lunge",
+    -- Cure
+    ["121216847022485"] = "cure Basic", ["135002183282873"] = "cure lunge",
+    -- Jason
+     ["113691709436161"] = "Jason Basic", ["129626174716003"] = "Jason lunge",
+    -- Jeff
+    ["75618342544502"] = "Jeff Basic", ["93902163029544"] = "Jeff lunge", ["104540716539347"] = "Jeff Frenzy lunge",
+    -- Abyssal
+    ["101636125032002"] = "Abyssal Basic", ["125430111937587"] = "Abyssal lunge", ["100014992013740"] = "Abyssal S1",
+    -- Masked
+    ["111920872708571"] = "Masked Basic", ["105374834496520"] = "Masked lunge", ["138720291317243"] = "Masked Tony", ["110360975271091"] = "Masked Alex", ["130593238885843"] = "Masked Cobra", ["115244153053858"] = "Masked Cobra lunge",
+    -- Hidden
+    ["74968262036854"] = "Hidden Basic", ["113255068724446"] = "Hidden lunge", ["98163597193511"] = "Hidden S1",
+    -- Buck
+    ["127417297154354"] = "Buck lunge", ["83333467665074"] = "Buck Basic"
+}
+
+Survivor.ID = {
+    hdnS1 = "98163597193511",
+    abys  = "100014992013740",
+    v1    = "101443662521580",
+    v2    = "127622545856523"
+}
+
+local isAutoTrapActive = false
+local autoTrapConnection = nil
+local activeLoopRoutine = nil
+
+local function GetFreeTrapRemote()
+    local remotes = ctx.S.ReplicatedStorage:FindFirstChild("Remotes")
+    return remotes 
+        and remotes:FindFirstChild("Killers") 
+        and remotes.Killers:FindFirstChild("Butcher") 
+        and remotes.Killers.Butcher:FindFirstChild("FreeTrap")
+end
+
+local function GetTrapSkillResultRemote()
+    local remotes = ctx.S.ReplicatedStorage:FindFirstChild("Remotes")
+    return remotes 
+        and remotes:FindFirstChild("Killers") 
+        and remotes.Killers:FindFirstChild("Butcher") 
+        and remotes.Killers.Butcher:FindFirstChild("TrapSkillResult")
+end
+
+local function RunAutoFreeTrapRoutine()
+    if activeLoopRoutine then return end
+    
+    activeLoopRoutine = task.spawn(function()
+        local localPlayer = ctx.S.LocalPlayer
+        local char = localPlayer.Character
+        if not char then return end
+
+        local freeTrapRemote = GetFreeTrapRemote()
+        local skillResultRemote = GetTrapSkillResultRemote()
+
+        if not freeTrapRemote or not skillResultRemote then
+            activeLoopRoutine = nil
+            return
+        end
+
+        if char:GetAttribute("Trapped") == true then
+            char:SetAttribute("Rooted", false)
+        end
+
+        pcall(function()
+            freeTrapRemote:FireServer("begin")
+        end)
+
+        local startTime = tick()
+        while isAutoTrapActive and (tick() - startTime < 12) do
+            pcall(function()
+                skillResultRemote:FireServer("perfect")
+            end)
+            task.wait(1)
+        end
+
+        if isAutoTrapActive then
+            pcall(function()
+                freeTrapRemote:FireServer("commit")
+            end)
+        end
+
+        activeLoopRoutine = nil
+    end)
+end
+
+function Survivor.AutoFreeTrap(state)
+    isAutoTrapActive = state
+
+    if state then
+        local localPlayer = ctx.S.LocalPlayer
+        
+        local function BindCharacter(char)
+            if autoTrapConnection then autoTrapConnection:Disconnect() end
+            
+            autoTrapConnection = char:GetAttributeChangedSignal("Trapped"):Connect(function()
+                if char:GetAttribute("Trapped") == true and isAutoTrapActive then
+                    RunAutoFreeTrapRoutine()
+                end
+            end)
+
+            if char:GetAttribute("Trapped") == true and isAutoTrapActive then
+                RunAutoFreeTrapRoutine()
+            end
+        end
+
+        if localPlayer.Character then
+            BindCharacter(localPlayer.Character)
+        end
+        
+        if not ctx.State.AutoTrapCharConn then
+            ctx.State.AutoTrapCharConn = localPlayer.CharacterAdded:Connect(BindCharacter)
+        end
+    else
+        if autoTrapConnection then
+            autoTrapConnection:Disconnect()
+            autoTrapConnection = nil
+        end
+        if ctx.State.AutoTrapCharConn then
+            ctx.State.AutoTrapCharConn:Disconnect()
+            ctx.State.AutoTrapCharConn = nil
+        end
+        if activeLoopRoutine then
+            task.cancel(activeLoopRoutine)
+            activeLoopRoutine = nil
+        end
+    end
+end
+
+local OriginalMovementSettings = nil
+
+function Survivor.AccelerationFast(state)
+    local success, SurvivorMovement = pcall(function()
+        local RS = ctx and ctx.S and ctx.S.ReplicatedStorage or game:GetService("ReplicatedStorage")
+        return require(RS:WaitForChild("Modules"):WaitForChild("Survivors"):WaitForChild("SurvivorMovement"))
+    end)
+
+    if not success or not SurvivorMovement then return end
+
+    if not OriginalMovementSettings then
+        OriginalMovementSettings = {
+            ACCELERATION_RATIO = SurvivorMovement.ACCELERATION_RATIO,
+            CURRENT_ACCELERATION_SECONDS = SurvivorMovement.CURRENT_ACCELERATION_SECONDS,
+            JITTER_MAX_ACCELERATION_SECONDS = SurvivorMovement.JITTER_MAX_ACCELERATION_SECONDS,
+            JITTER_TRIGGER_TIME = SurvivorMovement.JITTER_TRIGGER_TIME,
+            JITTER_BUILD_TIME = SurvivorMovement.JITTER_BUILD_TIME,
+            JITTER_RECOVERY_TIME = SurvivorMovement.JITTER_RECOVERY_TIME,
+            JITTER_FORWARD_PROGRESS_RATIO = SurvivorMovement.JITTER_FORWARD_PROGRESS_RATIO,
+            STEERING_FRICTION = SurvivorMovement.STEERING_FRICTION,
+            TURN_RESPONSE_CURVE = SurvivorMovement.TURN_RESPONSE_CURVE,
+            LIGHT_TURN_RESPONSE = SurvivorMovement.LIGHT_TURN_RESPONSE,
+            TRAVEL_TURN_RATE = SurvivorMovement.TRAVEL_TURN_RATE,
+            updateAcceleration = SurvivorMovement.updateAcceleration
+        }
+    end
+
+    if state then
+        SurvivorMovement.ACCELERATION_RATIO = 100
+        SurvivorMovement.CURRENT_ACCELERATION_SECONDS = 0.00001
+
+        SurvivorMovement.JITTER_MAX_ACCELERATION_SECONDS = 0
+        SurvivorMovement.JITTER_TRIGGER_TIME = 100
+        SurvivorMovement.JITTER_BUILD_TIME = 100
+        SurvivorMovement.JITTER_RECOVERY_TIME = 0.0001
+        SurvivorMovement.JITTER_FORWARD_PROGRESS_RATIO = 0
+
+        SurvivorMovement.STEERING_FRICTION = 0
+        SurvivorMovement.TURN_RESPONSE_CURVE = 0
+        SurvivorMovement.LIGHT_TURN_RESPONSE = 1
+        SurvivorMovement.TRAVEL_TURN_RATE = 100
+
+        SurvivorMovement.updateAcceleration = function(self, p6, p7, p8)
+            self.jitterPenalty = 0
+            self.jitterActiveTime = 0
+            self.accelerationSeconds = 0.00001
+            return OriginalMovementSettings.updateAcceleration(self, p6, p7, p8)
+        end
+
+        if raw_getgc then
+            for _, v in ipairs(raw_getgc(true)) do
+                if type(v) == "table" and raw_get(v, "accelerationSeconds") ~= nil then
+                    v.jitterPenalty = 0
+                    v.jitterActiveTime = 0
+                    v.accelerationSeconds = 0.00001
+                end
+            end
+        end
+    else
+        for key, val in pairs(OriginalMovementSettings) do
+            SurvivorMovement[key] = val
+        end
+    end
+end
+
+function Survivor.TriggerMobileButton()
+    pcall(function()
+        local b = ctx.S.LocalPlayer:FindFirstChild("PlayerGui")
+        for segment in string.gmatch("Survivor-mob.Controls.action.check", "[^%.]+") do 
+            if b then b = b:FindFirstChild(segment) end
+        end
+
+        if b and b:IsA("GuiObject") and b.Visible and b.Parent and b.Parent:IsA("GuiButton") then
+            local btn = b.Parent
+            if type(firesignal) == "function" then
+                pcall(function()
+                    firesignal(btn.MouseButton1Down)
+                    task.wait(0.01)
+                    firesignal(btn.MouseButton1Up)
+                end)
+            else
+                local center = btn.AbsolutePosition + (btn.AbsoluteSize / 2)
+                local inset = ctx.S.GuiService:GetGuiInset()
+                local x = center.X + inset.X
+                local y = center.Y + inset.Y
+                ctx.S.VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
+                task.wait(0.02)
+                ctx.S.VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
+            end
+        else
+            ctx.S.VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+            task.wait(0.012)
+            ctx.S.VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+        end
+    end)
+end
+
+function Survivor.SkillCheck()
+    task.spawn(function()
+        local PlayerGui = ctx.S.LocalPlayer:FindFirstChild("PlayerGui")
+        local prompt = PlayerGui:WaitForChild("SkillCheckPromptGui", 10) or PlayerGui:WaitForChild("SkillCheckPromptGui-con", 10)
+        if not prompt then return end
+        
+        local check = prompt:WaitForChild("Check", 8)
+        if not check then return end
+        
+        local line = check:WaitForChild("Line", 5)
+        local goal = check:WaitForChild("Goal", 5)
+        if not (line and goal) then return end
+        
+        if ctx.State.VisibilityConnection then ctx.State.VisibilityConnection:Disconnect() end
+        
+        ctx.State.VisibilityConnection = check:GetPropertyChangedSignal("Visible"):Connect(function()
+            if not ctx.Config.Surv_AutoSkillCheck or not (ctx.S.LocalPlayer.Team and ctx.S.LocalPlayer.Team.Name == "Survivors") then 
+                return 
+            end
+            if not ctx.Config.Surv_PerfectSkill then 
+                if ctx.State.HeartbeatConnection then ctx.State.HeartbeatConnection:Disconnect() ctx.State.HeartbeatConnection = nil end 
+                return 
+            end
+            
+            if check.Visible then
+                local trapGoal = check:FindFirstChild("TrapGoal")
+                local trapPerfect = check:FindFirstChild("TrapPerfect")
+                
+                local isTrapSkillCheck = (trapPerfect and trapPerfect.Visible) or (trapGoal and trapGoal.Visible)
+                local targetGoal = goal
+                
+                if trapPerfect and trapPerfect.Visible then
+                    targetGoal = trapPerfect
+                elseif trapGoal and trapGoal.Visible then
+                    targetGoal = trapGoal
+                end
+
+                local isInstan = true 
+                if ctx.Config.Surv_InstanSkill ~= nil then
+                    isInstan = ctx.Config.Surv_InstanSkill
+                end
+                
+                if isInstan then
+                    if isTrapSkillCheck then
+                        local minRot = targetGoal.Rotation + 102
+                        line.Rotation = minRot + 3
+                    else
+                        local currentGoalRotation = goal.Rotation % 360
+                        line.Rotation = currentGoalRotation + 85
+                    end
+                end
+                
+                local lastHitTick = 0 
+                local hitCount = 0
+                local lastRot = line.Rotation
+                
+                if ctx.State.HeartbeatConnection then ctx.State.HeartbeatConnection:Disconnect() end
+                
+                ctx.State.HeartbeatConnection = line:GetPropertyChangedSignal("Rotation"):Connect(function()
+                    if not ctx.Config.Surv_PerfectSkill then
+                        ctx.State.HeartbeatConnection:Disconnect() 
+                        ctx.State.HeartbeatConnection = nil 
+                        return
+                    end
+                    
+                    local lr = line.Rotation
+                    local inZone = false
+                    
+                    if isTrapSkillCheck then
+                        if lr < lastRot - 50 then
+                            hitCount = hitCount + 1
+                        end
+                        lastRot = lr
+                        
+                        if hitCount == 0 and trapPerfect and trapPerfect.Visible then
+                            targetGoal = trapPerfect
+                        elseif trapGoal and trapGoal.Visible then
+                            targetGoal = trapGoal
+                        end
+                        
+                        if targetGoal then
+                            local targetRot = targetGoal.Rotation
+                            local minRot = targetRot + 102
+                            local maxRot = (hitCount == 0) and (targetRot + 116) or (targetRot + 140)
+                            local currentModRot = lr % 360
+                            local minModRot = minRot % 360
+                            local maxModRot = maxRot % 360
+                            
+                            inZone = (minModRot > maxModRot and (currentModRot >= minModRot or currentModRot <= maxModRot)) or (currentModRot >= minModRot and currentModRot <= maxModRot)
+                        end
+                    else
+                        local lrMod = lr % 360
+                        local isNormalMode = ctx.Config.Surv_SkillCheckMode == "Normal" or (ctx.Config.Surv_SkillCheckMode == "Random" and ctx.State.RandomMode_IsNormal)
+                        local gr = goal.Rotation % 360
+                        local ss = (gr + 105) % 360
+                        local se = (gr + 115) % 360
+                        
+                        if isNormalMode then
+                            ss = (gr + 116) % 360
+                            se = (gr + 140) % 360
+                        end
+                        
+                        inZone = (ss > se and (lrMod >= ss or lrMod <= se)) or (lrMod >= ss and lrMod <= se)
+                    end
+                    
+                    if inZone then
+                        if tick() - lastHitTick > 0.2 then
+                            Survivor.TriggerMobileButton()
+                            lastHitTick = tick() 
+                        end
+                    end
+                end)
+            else
+                ctx.State.RandomMode_IsNormal = false
+                if ctx.State.HeartbeatConnection then ctx.State.HeartbeatConnection:Disconnect() ctx.State.HeartbeatConnection = nil end
+            end
+        end)
+    end)
+end
+
+function Survivor.AutoPallet(Value)
+    ctx.Config.Surv_AutoPallet = Value
+    ctx.State.DroppedPallets = ctx.State.DroppedPallets or {}
+    
+    if Value then
+        if ctx.State.AutoPalletThread then task.cancel(ctx.State.AutoPalletThread) end
+        
+        ctx.State.AutoPalletThread = task.spawn(function()
+            while ctx.Config.Surv_AutoPallet and not ctx.State.Unloaded do
+                task.wait(0.1)
+                
+                local remotes = ctx.S.ReplicatedStorage:FindFirstChild("Remotes")
+                local palletRemotes = remotes and remotes:FindFirstChild("Pallet")
+                local dropEvent = palletRemotes and palletRemotes:FindFirstChild("PalletDropEvent")
+                
+                if dropEvent then
+                    local myChar = ctx.S.LocalPlayer.Character
+                    local myRoot = ctx.GetCharacterRoot()
+                    
+                    if myRoot and myChar then
+                        local isHooked = myChar:GetAttribute("IsHooked") == true
+                        local isKnocked = myChar:GetAttribute("Knocked") == true
+                        local isCarried = myChar:GetAttribute("IsCarried") == true
+
+                        local canDrop = not (isHooked or isKnocked or isCarried)
+                        
+                        if canDrop then
+                            local activeKillers = {}
+                            for _, p in ipairs(ctx.ActivePlayers) do
+                                if ctx.IsKiller(p) and p.Character then
+                                    local kRoot = p.Character:FindFirstChild("HumanoidRootPart")
+                                    if kRoot then
+                                        table.insert(activeKillers, { root = kRoot, char = p.Character })
+                                    end
+                                end
+                            end
+                            
+                            if #activeKillers > 0 then
+                                local mapFolder = ctx.S.Workspace:FindFirstChild("Map")
+                                
+                                if mapFolder then
+                                    for _, descendant in ipairs(mapFolder:GetDescendants()) do
+                                        if descendant.Name == "Newpallet" and descendant:IsA("Model") and not ctx.State.DroppedPallets[descendant] then
+                                            local intact = descendant:FindFirstChild("Intact")
+                                            
+                                            if intact then
+                                                for _, child in ipairs(intact:GetChildren()) do
+                                                    if child.Name == "PalletPoint" and child:IsA("BasePart") then
+                                                        local targetPart = child
+                                                        local shouldDrop = false
+                                                        local distToMe = (myRoot.Position - targetPart.Position).Magnitude
+                                                        local radius = ctx.Config.Surv_AutoPalletRadius or 15
+                                                        
+                                                        for _, kData in ipairs(activeKillers) do
+                                                            local distToKiller = (kData.root.Position - targetPart.Position).Magnitude
+                                                            
+                                                            if distToMe <= radius and distToKiller <= radius then
+                                                                shouldDrop = true
+                                                                break
+                                                            end
+                                                        end
+                                                        
+                                                        if shouldDrop then
+                                                            pcall(function()
+                                                                dropEvent:FireServer(
+                                                                    targetPart,
+                                                                    targetPart.Position,
+                                                                    Vector3.new(0, 0, 0),
+                                                                    game:GetService("HttpService"):GenerateGUID(false),
+                                                                    myChar
+                                                                )
+                                                            end)
+                                                            ctx.State.DroppedPallets[descendant] = true
+                                                            break -- Keluar dari loop child setelah dijatuhkan
+                                                        end
+                                                    end
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    else
+        if ctx.State.AutoPalletThread then 
+            task.cancel(ctx.State.AutoPalletThread)
+            ctx.State.AutoPalletThread = nil
+        end
+        if ctx.State.DroppedPallets then
+            table.clear(ctx.State.DroppedPallets)
+        end
+    end
+end
+
+function Survivor.SkillS(char)
+    if not char then return end
+
+    local customSounds = {
+        Great = "rbxassetid://111033165135961",
+        Sound = "rbxassetid://138997442392324"
+    }
+
+    local targetScripts = {"Skillcheck-gen", "Skillcheck-player"}
+
+    task.spawn(function()
+        for _, scriptName in ipairs(targetScripts) do
+            local sc = char:WaitForChild(scriptName, 5)
+            if sc then
+                for soundName, soundId in pairs(customSounds) do
+                    local snd = sc:WaitForChild(soundName, 5)
+                    if snd and snd:IsA("Sound") then
+                        if not snd:GetAttribute("OriginalSoundId") then
+                            snd:SetAttribute("OriginalSoundId", snd.SoundId)
+                        end
+
+                        if ctx.Config.Surv_SoundDbd then
+                            snd.SoundId = soundId
+                        else
+                            local originalId = snd:GetAttribute("OriginalSoundId")
+                            if originalId then
+                                snd.SoundId = originalId
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+function Survivor.ParryButton()
+    pcall(function()
+        local playerGui = ctx.S.LocalPlayer:FindFirstChild("PlayerGui")
+        if not playerGui then return end
+        
+        local survivorMob = playerGui:FindFirstChild("Survivor-mob")
+        local parryBtn = survivorMob and survivorMob:FindFirstChild("Controls") and survivorMob.Controls:FindFirstChild("Gui-mob")
+
+        if parryBtn and parryBtn:IsA("GuiObject") and parryBtn.Visible then
+            if type(firesignal) == "function" then
+                pcall(function()
+                    firesignal(parryBtn.MouseButton1Down)
+                    task.wait(0.01)
+                    firesignal(parryBtn.MouseButton1Up)
+                end)
+            end
+        else
+            pcall(function()
+                ctx.S.VirtualInputManager:SendMouseButtonEvent(0, 0, 1, true, game, 0)
+                task.wait(0.01)
+                ctx.S.VirtualInputManager:SendMouseButtonEvent(0, 0, 1, false, game, 0)
+            end)
+        end
+    end)
+end
+
+function Survivor.ExecuteParry()
+    pcall(function()
+        if ctx.ParryRemote and ctx.S.LocalPlayer.Character then
+            ctx.ParryRemote:FireServer(ctx.S.LocalPlayer.Character)
+        end
+        task.spawn(Survivor.ParryButton)
+    end)
+end
+
+function Survivor.ParryV2S(isActive)
+    if isActive then
+        if ctx.State.Pv2Con then return end
+
+        ctx.State.Pv2Con = ctx.S.RunService.Heartbeat:Connect(function()
+
+            local myChar = ctx.S.LocalPlayer.Character
+            if not myChar or ctx.IsDowned(myChar) or not ctx.IsSafeToParry(myChar) then return end
+
+            local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+            if not myHRP then return end
+
+            local radius = ctx.Config.Surv_ParryRadius or 15
+            local checkRadius = radius + 5
+
+            for _, p in ipairs(ctx.ActiveKillers) do
+                local kChar = p.Character
+                if not kChar then continue end
+                local kHRP = kChar:FindFirstChild("HumanoidRootPart")
+                if not kHRP then continue end
+
+                local dist = (myHRP.Position - kHRP.Position).Magnitude
+                if dist > checkRadius then continue end
+
+                local humanoid = kChar:FindFirstChildOfClass("Humanoid")
+                if not humanoid then continue end
+
+                local animator = humanoid:FindFirstChildOfClass("Animator")
+                if not animator then continue end
+
+                local isFacingMe = false
+                local myPosFlat = Vector3.new(myHRP.Position.X, 0, myHRP.Position.Z)
+                local kPosFlat = Vector3.new(kHRP.Position.X, 0, kHRP.Position.Z)
+                local flatDelta = myPosFlat - kPosFlat
+
+                if flatDelta.Magnitude > 0 then
+                    local flatDirection = flatDelta.Unit
+                    local kLookFlat = Vector3.new(kHRP.CFrame.LookVector.X, 0, kHRP.CFrame.LookVector.Z).Unit
+                    local dotProduct = kLookFlat:Dot(flatDirection)
+                    isFacingMe = (dotProduct >= (ctx.Config.Surv_ParryFace or 0.85))
+                end
+
+                if not isFacingMe then continue end
+
+                local playingTracks = animator:GetPlayingAnimationTracks()
+                for _, track in ipairs(playingTracks) do
+                    if not ctx.State.TrackV2[track] then
+                        ctx.State.TrackV2[track] = true
+
+                        local animId = track.Animation and track.Animation.AnimationId or ""
+                        local id = animId:match("%d+")
+                        local attackName = ctx.VALID_PARRY_IDS[id]
+
+                        if attackName then
+                            if not (ctx.Config.Ignored_Skills_List and ctx.Config.Ignored_Skills_List[attackName]) then
+                                if dist <= ctx.Config.Surv_ParryRadius then
+                                    Survivor.ExecuteParry()
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            for track, _ in pairs(ctx.State.TrackV2) do
+                if not track.IsPlaying then
+                    ctx.State.TrackV2[track] = nil
+                end
+            end
+        end)
+    else
+        if ctx.State.Pv2Con then
+            ctx.State.Pv2Con:Disconnect()
+            ctx.State.Pv2Con = nil
+        end
+        table.clear(ctx.State.TrackV2)
+    end
+end
+
+function Survivor.TriggerCrouch(time)
+    pcall(function()
+        local b = ctx.S.LocalPlayer:FindFirstChild("PlayerGui")
+
+        for segment in string.gmatch("Survivor-mob.Controls.crouch.icon", "[^%.]+") do
+            if b then
+                b = b:FindFirstChild(segment)
+            end
+        end
+
+        if b and b:IsA("GuiObject") and b.Visible and b.Parent and b.Parent:IsA("GuiButton") then
+            local btn = b.Parent
+
+            if ctx.S.UserInputService.TouchEnabled and type(firesignal) == "function" then
+                firesignal(btn.MouseButton1Click)
+                task.wait(time)
+                firesignal(btn.MouseButton1Click)
+            else
+                ctx.S.VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.LeftControl, false, game)
+                task.wait(time)
+                ctx.S.VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftControl, false, game)
+            end
+        else
+            ctx.S.VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.LeftControl, false, game)
+            task.wait(time)
+            ctx.S.VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftControl, false, game)
+        end
+    end)
+end
+
+function Survivor.TeleportToEscape()
+    local root = ctx.GetCharacterRoot()
+    local map = ctx.S.Workspace:FindFirstChild("Map")
+    if not root or not map then return false end
+    
+    local exitPos = nil
+    
+    pcall(function()
+        for _, obj in ipairs(map:GetDescendants()) do
+            local nameLower = string.lower(obj.Name)
+            if nameLower == "fininshline" or nameLower == "finishline" or string.find(nameLower, "finish") then
+                if obj:IsA("BasePart") then
+                    exitPos = obj.Position
+                    break
+                elseif obj:IsA("Model") then
+                    local part = obj:FindFirstChildWhichIsA("BasePart")
+                    if part then
+                        exitPos = part.Position
+                        break
+                    end
+                end
+            end
+        end
+
+        if not exitPos then
+            if map:FindFirstChild("RooftopHitbox") or map:FindFirstChild("Rooftop") then 
+                exitPos = Vector3.new(3098.16, 454.04, -4918.74)
+            elseif map:FindFirstChild("HooksMeat") then 
+                exitPos = Vector3.new(1546.12, 152.21, -796.72)
+            elseif map:FindFirstChild("churchbell") then 
+                exitPos = Vector3.new(760.98, -20.14, -78.48)
+            else
+                for _, obj in ipairs(map:GetDescendants()) do 
+                    if obj:IsA("MeshPart") and obj.Material == Enum.Material.Limestone then 
+                        exitPos = Vector3.new(-947.90, 152.12, -7579.52)
+                        break 
+                    elseif obj:IsA("MeshPart") and obj.Material == Enum.Material.Leather then 
+                        exitPos = Vector3.new(1546.12, 152.21, -796.72)
+                        break 
+                    end 
+                end
+            end
+        end
+    end)
+    
+    if exitPos then 
+        root.CFrame = CFrame.new(exitPos + Vector3.new(0, 3, 0)) 
+        return true
+    end
+    
+    return false
+end
+
+function Misc.Init(context)
+    ctx = context
+end
+
+function Misc.EnableSpoofer() 
+    if not ctx.Config.Misc_FakeName then return end
+    local PlayerGui = ctx.S.LocalPlayer:FindFirstChild("PlayerGui")
+    if not PlayerGui then return end
+    
+    ctx.State.SpooferConns = ctx.State.SpooferConns or {}
+
+    local function applySpooferToObj(obj)
+        pcall(function()
+            if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+                local function updateText()
+                    if not ctx.Config.Misc_FakeName then return end
+                    local currentText = obj.Text
+                    local changed = false
+
+                    if not obj:GetAttribute("OriginalText") then
+                        obj:SetAttribute("OriginalText", currentText)
+                    end
+
+                    for _, player in ipairs(ctx.S.Players:GetPlayers()) do
+                        local pName = player.Name
+                        local pDisp = player.DisplayName
+                        
+                        if pName and pName ~= "" and string.find(currentText, pName) then
+                            currentText = string.gsub(currentText, pName, ctx.ScInfo.name)
+                            changed = true
+                        end
+                        if pDisp and pDisp ~= "" and string.find(currentText, pDisp) then
+                            currentText = string.gsub(currentText, pDisp, ctx.ScInfo.name)
+                            changed = true
+                        end
+                    end
+                    
+                    if changed and obj.Text ~= currentText then
+                        obj.Text = currentText
+                    end
+                end
+
+                updateText()
+                local conn = obj:GetPropertyChangedSignal("Text"):Connect(updateText)
+                table.insert(ctx.State.SpooferConns, conn)
+                
+            elseif obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
+                local function updateImage()
+                    if not ctx.Config.Misc_FakeName then return end
+                    local currentImg = obj.Image
+                    local changed = false
+
+                    for _, player in ipairs(ctx.S.Players:GetPlayers()) do
+                        if string.find(currentImg, tostring(player.UserId)) then
+                            if not obj:GetAttribute("OriginalImage") then
+                                obj:SetAttribute("OriginalImage", currentImg)
+                            end
+                            changed = true
+                            break 
+                        end
+                    end
+
+                    local targetIconId = "rbxassetid://" .. ctx.ScInfo.icon
+                    if changed and obj.Image ~= targetIconId then
+                        obj.Image = targetIconId
+                    end
+                end
+
+                updateImage() 
+                local conn = obj:GetPropertyChangedSignal("Image"):Connect(updateImage)
+                table.insert(ctx.State.SpooferConns, conn)
+            end
+        end)
+    end
+    
+    for _, obj in ipairs(PlayerGui:GetDescendants()) do applySpooferToObj(obj) end
+    local conn = PlayerGui.DescendantAdded:Connect(function(obj) task.defer(function() applySpooferToObj(obj) end) end)
+    table.insert(ctx.State.SpooferConns, conn) 
+end
+
+function Misc.DisableSpoofer() 
+    ctx.State.SpooferConns = ctx.State.SpooferConns or {}
+    for _, conn in ipairs(ctx.State.SpooferConns) do 
+        if conn.Connected then conn:Disconnect() end 
+    end
+    table.clear(ctx.State.SpooferConns) 
+    
+    local PlayerGui = ctx.S.LocalPlayer:FindFirstChild("PlayerGui")
+    if PlayerGui then
+        for _, obj in ipairs(PlayerGui:GetDescendants()) do
+            pcall(function()
+                if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+                    local oriText = obj:GetAttribute("OriginalText")
+                    if oriText then
+                        obj.Text = oriText
+                        obj:SetAttribute("OriginalText", nil)
+                    end
+                elseif obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
+                    local oriImg = obj:GetAttribute("OriginalImage")
+                    if oriImg then
+                        obj.Image = oriImg
+                        obj:SetAttribute("OriginalImage", nil)
+                    end
+                end
+            end)
+        end
+    end
+end
+
+return Combat, Killer, Survivor, Misc
